@@ -1,4 +1,4 @@
-const { useState, useMemo } = React;
+const { useState, useMemo, useEffect, useRef } = React;
 
 function ERPApp() {
   // 1. 데이터 상태
@@ -10,9 +10,12 @@ function ERPApp() {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSearchItem, setSelectedSearchItem] = useState(null);
   const [showDropdown, setShowDropdown] = useState(false);
+  const searchContainerRef = useRef(null);
 
-  const [currentYear, setCurrentYear] = useState(2026);
-  const [currentMonth, setCurrentMonth] = useState(9); // 10월 (0-based)
+  // 실시간 오늘 날짜 기준 연/월 초기화
+  const today = new Date();
+  const [currentYear, setCurrentYear] = useState(today.getFullYear());
+  const [currentMonth, setCurrentMonth] = useState(today.getMonth()); // 0-based
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(null);
 
   // 3. 부족예정 경고 전용 상태
@@ -22,16 +25,17 @@ function ERPApp() {
 
   // 실시간 오늘 날짜 (YYYY-MM-DD)
   const getTodayString = () => {
-    const today = new Date();
     const y = today.getFullYear();
     const m = String(today.getMonth() + 1).padStart(2, '0');
     const d = String(today.getDate()).padStart(2, '0');
     return `${y}-${m}-${d}`;
   };
 
-  // 엑셀 날짜 정제
+  // 엑셀 날짜 정제 (Excel Serial, YYYY-MM-DD, 표시형식 '10월 21일' 모두 정규화)
   const parseExcelDate = (val) => {
     if (val === null || val === undefined || val === '') return '-';
+
+    // 1. Excel 숫자 시리얼 날짜 코드인 경우
     if (typeof val === 'number') {
       const date = XLSX.SSF.parse_date_code(val);
       if (date) {
@@ -41,7 +45,35 @@ function ERPApp() {
         return `${y}-${m}-${d}`;
       }
     }
-    return String(val).trim();
+
+    let str = String(val).trim();
+
+    // 2. '10월 21일' 또는 '10월21일' 한글 포맷 정제
+    if (str.includes('월')) {
+      const match = str.match(/(\d+)\s*월\s*(\d+)\s*일?/);
+      if (match) {
+        const m = String(match[1]).padStart(2, '0');
+        const d = String(match[2]).padStart(2, '0');
+        return `${currentYear}-${m}-${d}`;
+      }
+    }
+
+    // 3. '2026-10-21', '2026.10.21', '10/21' 등 구분자 정제
+    str = str.replace(/[\.\/]/g, '-');
+    const parts = str.split('-').filter(Boolean);
+
+    if (parts.length === 3) {
+      const y = parts[0].length === 2 ? `20${parts[0]}` : parts[0];
+      const m = parts[1].padStart(2, '0');
+      const d = parts[2].padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    } else if (parts.length === 2) {
+      const m = parts[0].padStart(2, '0');
+      const d = parts[1].padStart(2, '0');
+      return `${currentYear}-${m}-${d}`;
+    }
+
+    return str;
   };
 
   const getCellValue = (worksheet, colLetter, rowNum) => {
@@ -49,6 +81,17 @@ function ERPApp() {
     const cell = worksheet[cellAddress];
     return cell ? cell.v : undefined;
   };
+
+  // 검색 드롭다운 외부 클릭 감지
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target)) {
+        setShowDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   // 공급사/고객사에만 존재하는 품목 자동 통합 등록
   const syncMasterListWithAllItems = (newSupplierList, newCustomerList, currentMasterList) => {
@@ -345,7 +388,7 @@ function ERPApp() {
   };
 
   // --------------------------------------------------------------------------
-  // 🔥 부족예정 경고 (오늘 포함 '이후' 날짜만 경고 UI 표시)
+  // 🔥 부족예정 경고 (0미만: RED, 0~20: YELLOW)
   // --------------------------------------------------------------------------
   const deficitAlerts = useMemo(() => {
     const alerts = [];
@@ -353,41 +396,50 @@ function ERPApp() {
 
     itemMasterData.forEach(master => {
       const itemCode = master.itemCode;
-      let runningStock = master.currentStock;
-
+      
+      // 출고 목록 (날짜순 정렬)
       const itemOutbounds = customerData
         .filter(c => c.itemCode === itemCode)
         .sort((a, b) => a.outDate.localeCompare(b.outDate));
 
+      // 입고 목록 (날짜순 정렬)
       const itemInbounds = supplierData
         .filter(s => s.itemCode === itemCode)
         .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 
-      let appliedInboundIndex = 0;
+      let runningStock = master.currentStock;
+      const appliedInboundIds = new Set();
 
       itemOutbounds.forEach(out => {
-        // 출고일 이전 입고 물량 반영
-        while (
-          appliedInboundIndex < itemInbounds.length && 
-          itemInbounds[appliedInboundIndex].dueDate <= out.outDate
-        ) {
-          runningStock += itemInbounds[appliedInboundIndex].qty;
-          appliedInboundIndex++;
-        }
+        // 오늘(todayStr) 이상 ~ 출고일(out.outDate) 이하 유효 입고건 반영
+        itemInbounds.forEach(inb => {
+          if (!appliedInboundIds.has(inb.id)) {
+            if (inb.dueDate >= todayStr && inb.dueDate <= out.outDate) {
+              runningStock += inb.qty;
+              appliedInboundIds.add(inb.id);
+            }
+          }
+        });
 
         // 출고 차감
         runningStock -= out.qty;
 
+        // 경고 색상 띠 판정
         let status = 'NORMAL';
-        if (runningStock <= 0) {
-          status = 'RED';
-        } else if (runningStock <= 20) {
-          status = 'YELLOW';
+        if (runningStock < 0) {
+          status = 'RED'; // 0미만: 빨간 띠 (위험)
+        } else if (runningStock >= 0 && runningStock <= 20) {
+          status = 'YELLOW'; // 0이상 ~ 20이하: 노란 띠 (주의)
         }
 
-        // ★ 핵심 조건: '오늘 포함 이후(out.outDate >= todayStr)' 날짜인 경고만 추출
+        // 오늘 이후 출고건 중, RED 또는 YELLOW 상태인 경고건만 추출
         if (status !== 'NORMAL' && out.outDate >= todayStr) {
+          // 출고일 기준 예정 입고건
           const futureInbounds = itemInbounds.filter(i => i.dueDate >= out.outDate && i.qty > 0);
+          
+          // ★ [보완] 오늘 날짜 이전(지연건) 입고 항목 (수량이 1개 이상인 건)
+          const delayedInbounds = itemInbounds.filter(i => i.dueDate < todayStr && i.qty > 0);
+
           const recentInbound = futureInbounds[0];
 
           alerts.push({
@@ -397,12 +449,14 @@ function ERPApp() {
             currentStock: master.currentStock,
             deliveryDate: out.outDate,
             outQty: out.qty,
-            deficitQty: runningStock <= 0 ? Math.abs(runningStock) : 0, 
             status,
+            expectedStock: runningStock,
+            deficitQty: runningStock < 0 ? Math.abs(runningStock) : 0, 
             recentInboundText: recentInbound 
               ? `${recentInbound.dueDate} (+${recentInbound.qty}EA)` 
-              : '입고예정 없음',
-            futureInbounds
+              : (delayedInbounds.length > 0 ? `지연건 ${delayedInbounds.length}건 존재` : '입고예정 없음'),
+            futureInbounds,
+            delayedInbounds
           });
         }
       });
@@ -435,6 +489,15 @@ function ERPApp() {
       .map(c => c.outDate);
   }, [selectedSearchItem, customerData]);
 
+  const outboundsByDateMap = useMemo(() => {
+    const map = new Map();
+    customerData.forEach(c => {
+      if (!map.has(c.outDate)) map.set(c.outDate, []);
+      map.get(c.outDate).push(c);
+    });
+    return map;
+  }, [customerData]);
+
   const calendarDays = useMemo(() => {
     const firstDayIndex = new Date(currentYear, currentMonth, 1).getDay();
     const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
@@ -448,7 +511,7 @@ function ERPApp() {
       const dStr = String(d).padStart(2, '0');
       const dateStr = `${currentYear}-${mStr}-${dStr}`;
 
-      const dateOutboundList = customerData.filter(c => c.outDate === dateStr);
+      const dateOutboundList = outboundsByDateMap.get(dateStr) || [];
       const isHighlighted = highlightedOutboundDates.includes(dateStr);
       const isRedAlertHighlighted = calendarRedHighlightDate === dateStr;
 
@@ -461,12 +524,12 @@ function ERPApp() {
       });
     }
     return days;
-  }, [currentYear, currentMonth, customerData, highlightedOutboundDates, calendarRedHighlightDate]);
+  }, [currentYear, currentMonth, outboundsByDateMap, highlightedOutboundDates, calendarRedHighlightDate]);
 
   const selectedDayOutbounds = useMemo(() => {
     if (!selectedCalendarDate) return [];
-    return customerData.filter(c => c.outDate === selectedCalendarDate);
-  }, [selectedCalendarDate, customerData]);
+    return outboundsByDateMap.get(selectedCalendarDate) || [];
+  }, [selectedCalendarDate, outboundsByDateMap]);
 
   const prevMonth = () => {
     if (currentMonth === 0) { setCurrentYear(p => p - 1); setCurrentMonth(11); }
@@ -521,7 +584,7 @@ function ERPApp() {
 
         {/* TOP: SEARCH & RESULT CARD */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-7 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-3 relative">
+          <div ref={searchContainerRef} className="lg:col-span-7 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-3 relative">
             <label className="block text-sm font-bold text-slate-700">🔍 품목검색 (품목코드 또는 퓨처스코드)</label>
             <div className="relative">
               <input 
@@ -654,13 +717,13 @@ function ERPApp() {
                   onClick={() => setAlertFilter('YELLOW')}
                   className={`px-2.5 py-1 rounded-lg transition ${alertFilter === 'YELLOW' ? 'bg-amber-400 text-slate-900 font-bold' : 'text-slate-500'}`}
                 >
-                  주의(20이하)
+                  주의(0~20)
                 </button>
                 <button
                   onClick={() => setAlertFilter('RED')}
                   className={`px-2.5 py-1 rounded-lg transition ${alertFilter === 'RED' ? 'bg-red-500 text-white font-bold' : 'text-slate-500'}`}
                 >
-                  위험(0이하)
+                  위험(&lt;0)
                 </button>
               </div>
             </div>
@@ -698,13 +761,19 @@ function ERPApp() {
                           <div className="text-xs text-slate-600 grid grid-cols-2 gap-x-2 gap-y-1">
                             <div>
                               현재고: <span className="font-bold text-slate-800">{alert.currentStock}EA</span>
+                            </div>
+                            <div>납품일자: <span className="font-bold text-red-600">{alert.deliveryDate}</span></div>
+                            <div className="col-span-2 text-[11px]">
+                              출고시 예상재고: {' '}
+                              <span className={`font-extrabold ${isRed ? 'text-red-600' : 'text-amber-600'}`}>
+                                {alert.expectedStock}EA
+                              </span>
                               {alert.deficitQty > 0 && (
                                 <span className="text-red-600 font-extrabold ml-1">
                                   ({alert.deficitQty}EA 부족)
                                 </span>
                               )}
                             </div>
-                            <div>납품일자: <span className="font-bold text-red-600">{alert.deliveryDate}</span></div>
                             <div className="col-span-2 text-[11px] text-slate-500">
                               최근 입고예정: <span className="font-semibold text-slate-700">{alert.recentInboundText}</span>
                             </div>
@@ -730,21 +799,42 @@ function ERPApp() {
                             </button>
                           </div>
 
+                          {/* ★ 입고일정 상세 영역 (과거 지연건 + 미래 예정건 모두 표시) */}
                           {isExpanded && (
-                            <div className="mt-2 pt-2 border-t border-slate-200 text-xs bg-white p-3 rounded-xl space-y-1.5 shadow-inner">
-                              <p className="font-bold text-slate-700 text-[11px] mb-1">
-                                📦 납품일({alert.deliveryDate}) 이후 예정 입고 목록:
-                              </p>
-                              {alert.futureInbounds.length > 0 ? (
-                                alert.futureInbounds.map((inb, i) => (
-                                  <div key={i} className="flex justify-between text-[11px] text-slate-600 border-b border-slate-50 pb-1">
-                                    <span>• {inb.dueDate} ({inb.supplier})</span>
-                                    <span className="font-bold text-emerald-600">+{inb.qty}EA</span>
-                                  </div>
-                                ))
-                              ) : (
-                                <p className="text-slate-400 text-[11px]">납품일 이후 예정된 입고 일정이 없습니다.</p>
+                            <div className="mt-2 pt-2 border-t border-slate-200 text-xs bg-white p-3 rounded-xl space-y-2.5 shadow-inner">
+                              
+                              {/* 1. 오늘 기준 과거 지연 입고건 (수량 >= 1) */}
+                              {alert.delayedInbounds && alert.delayedInbounds.length > 0 && (
+                                <div className="space-y-1 bg-red-50/60 p-2 rounded-lg border border-red-100">
+                                  <p className="font-bold text-red-600 text-[11px] flex items-center gap-1">
+                                    <span>⚠️</span> 미입고 지연건 (납기일 경과):
+                                  </p>
+                                  {alert.delayedInbounds.map((inb, i) => (
+                                    <div key={`del-${i}`} className="flex justify-between text-[11px] text-red-700 border-b border-red-100/50 pb-0.5 last:border-none">
+                                      <span>{inb.dueDate} ({inb.supplier})</span>
+                                      <span className="font-bold">+{inb.qty}EA (미입고)</span>
+                                    </div>
+                                  ))}
+                                </div>
                               )}
+
+                              {/* 2. 납품일 기준 미래 입고 예정건 */}
+                              <div className="space-y-1">
+                                <p className="font-bold text-slate-700 text-[11px]">
+                                  📦 납품일({alert.deliveryDate}) 기준 입고 예정 목록:
+                                </p>
+                                {alert.futureInbounds.length > 0 ? (
+                                  alert.futureInbounds.map((inb, i) => (
+                                    <div key={`fut-${i}`} className="flex justify-between text-[11px] text-slate-600 border-b border-slate-50 pb-1">
+                                      <span>{inb.dueDate} ({inb.supplier})</span>
+                                      <span className="font-bold text-emerald-600">+{inb.qty}EA</span>
+                                    </div>
+                                  ))
+                                ) : (
+                                  <p className="text-slate-400 text-[11px]">납품일 이후 예정된 입고 일정이 없습니다.</p>
+                                )}
+                              </div>
+
                             </div>
                           )}
 
