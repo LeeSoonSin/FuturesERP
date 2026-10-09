@@ -6,24 +6,24 @@ function ERPApp() {
   const [customerData, setCustomerData] = useState([]);
   const [itemMasterData, setItemMasterData] = useState([]);
 
-  // 2. 검색 & 캘린더 상태
+  // 2. 메인 검색 & 캘린더 상태
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSearchItem, setSelectedSearchItem] = useState(null);
   const [showDropdown, setShowDropdown] = useState(false);
   const searchContainerRef = useRef(null);
 
-  // 실시간 오늘 날짜 기준 연/월 초기화
   const today = new Date();
   const [currentYear, setCurrentYear] = useState(today.getFullYear());
-  const [currentMonth, setCurrentMonth] = useState(today.getMonth()); // 0-based
+  const [currentMonth, setCurrentMonth] = useState(today.getMonth());
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(null);
 
-  // 3. 부족예정 경고 전용 상태
-  const [alertFilter, setAlertFilter] = useState('ALL'); 
+  // 3. 부족예정 경고 전용 상태 (필터 & 검색)
+  const [alertFilter, setAlertFilter] = useState('ALL'); // ALL, YELLOW, RED
+  const [alertCustomerFilter, setAlertCustomerFilter] = useState('ALL'); // 고객사 필터
+  const [alertSearchTerm, setAlertSearchTerm] = useState(''); // 경고 목록 전용 품목 검색
   const [calendarRedHighlightDate, setCalendarRedHighlightDate] = useState(null); 
   const [expandedAlertId, setExpandedAlertId] = useState(null); 
 
-  // 실시간 오늘 날짜 (YYYY-MM-DD)
   const getTodayString = () => {
     const y = today.getFullYear();
     const m = String(today.getMonth() + 1).padStart(2, '0');
@@ -31,11 +31,10 @@ function ERPApp() {
     return `${y}-${m}-${d}`;
   };
 
-  // 엑셀 날짜 정제 (Excel Serial, YYYY-MM-DD, 표시형식 '10월 21일' 모두 정규화)
+  // 엑셀 날짜 정제
   const parseExcelDate = (val) => {
     if (val === null || val === undefined || val === '') return '-';
 
-    // 1. Excel 숫자 시리얼 날짜 코드인 경우
     if (typeof val === 'number') {
       const date = XLSX.SSF.parse_date_code(val);
       if (date) {
@@ -48,7 +47,6 @@ function ERPApp() {
 
     let str = String(val).trim();
 
-    // 2. '10월 21일' 또는 '10월21일' 한글 포맷 정제
     if (str.includes('월')) {
       const match = str.match(/(\d+)\s*월\s*(\d+)\s*일?/);
       if (match) {
@@ -58,7 +56,6 @@ function ERPApp() {
       }
     }
 
-    // 3. '2026-10-21', '2026.10.21', '10/21' 등 구분자 정제
     str = str.replace(/[\.\/]/g, '-');
     const parts = str.split('-').filter(Boolean);
 
@@ -82,7 +79,6 @@ function ERPApp() {
     return cell ? cell.v : undefined;
   };
 
-  // 검색 드롭다운 외부 클릭 감지
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (searchContainerRef.current && !searchContainerRef.current.contains(e.target)) {
@@ -93,7 +89,7 @@ function ERPApp() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // 공급사/고객사에만 존재하는 품목 자동 통합 등록
+  // 마스터 품목 자동 통합 동기화
   const syncMasterListWithAllItems = (newSupplierList, newCustomerList, currentMasterList) => {
     const masterMap = new Map();
 
@@ -101,35 +97,27 @@ function ERPApp() {
       masterMap.set(item.itemCode, item);
     });
 
-    newSupplierList.forEach(sup => {
-      if (!masterMap.has(sup.itemCode)) {
-        masterMap.set(sup.itemCode, {
-          id: `auto-master-${sup.itemCode}`,
-          itemCode: sup.itemCode,
+    const registerAutoItem = (itemCode) => {
+      if (!itemCode || itemCode === 'undefined' || itemCode === '품목코드') return;
+      if (!masterMap.has(itemCode)) {
+        masterMap.set(itemCode, {
+          id: `auto-master-${itemCode}`,
+          itemCode: itemCode,
           futuresCode: '미등록',
           currentStock: 0,
           customerCodes: {}
         });
       }
-    });
+    };
 
-    newCustomerList.forEach(cust => {
-      if (!masterMap.has(cust.itemCode)) {
-        masterMap.set(cust.itemCode, {
-          id: `auto-master-${cust.itemCode}`,
-          itemCode: cust.itemCode,
-          futuresCode: '미등록',
-          currentStock: 0,
-          customerCodes: {}
-        });
-      }
-    });
+    newSupplierList.forEach(sup => registerAutoItem(sup.itemCode));
+    newCustomerList.forEach(cust => registerAutoItem(cust.itemCode));
 
     return Array.from(masterMap.values());
   };
 
   // --------------------------------------------------------------------------
-  // 엑셀 파싱 핸들러
+  // 엑셀 업로드 파일 핸들러
   // --------------------------------------------------------------------------
   const handleSupplierFileUpload = (e) => {
     const file = e.target.files[0];
@@ -186,7 +174,7 @@ function ERPApp() {
         });
 
         setSupplierData(parsedResults);
-        setItemMasterData(prevMaster => syncMasterListWithAllItems(parsedResults, customerData, prevMaster));
+        setItemMasterData(prev => syncMasterListWithAllItems(parsedResults, customerData, prev));
         alert(`공급사.xlsx 로드 완료! (${parsedResults.length}건)`);
       } catch (err) {
         console.error(err);
@@ -251,7 +239,7 @@ function ERPApp() {
         });
 
         setCustomerData(parsedResults);
-        setItemMasterData(prevMaster => syncMasterListWithAllItems(supplierData, parsedResults, prevMaster));
+        setItemMasterData(prev => syncMasterListWithAllItems(supplierData, parsedResults, prev));
         alert(`고객사.xlsx 로드 완료! (${parsedResults.length}건)`);
       } catch (err) {
         console.error(err);
@@ -388,58 +376,55 @@ function ERPApp() {
   };
 
   // --------------------------------------------------------------------------
-  // 🔥 부족예정 경고 (0미만: RED, 0~20: YELLOW)
+  // 부족예정 경고 계산 및 필터링
   // --------------------------------------------------------------------------
   const deficitAlerts = useMemo(() => {
     const alerts = [];
-    const todayStr = getTodayString(); // 오늘 날짜 (YYYY-MM-DD)
+    const todayStr = getTodayString();
 
     itemMasterData.forEach(master => {
       const itemCode = master.itemCode;
       
-      // 출고 목록 (날짜순 정렬)
       const itemOutbounds = customerData
         .filter(c => c.itemCode === itemCode)
         .sort((a, b) => a.outDate.localeCompare(b.outDate));
 
-      // 입고 목록 (날짜순 정렬)
       const itemInbounds = supplierData
         .filter(s => s.itemCode === itemCode)
         .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 
+      if (itemOutbounds.length === 0) return;
+
       let runningStock = master.currentStock;
-      const appliedInboundIds = new Set();
+      
+      itemInbounds.forEach(inb => {
+        if (inb.dueDate < todayStr) {
+          runningStock += inb.qty;
+        }
+      });
+
+      const processedInboundIds = new Set();
 
       itemOutbounds.forEach(out => {
-        // 오늘(todayStr) 이상 ~ 출고일(out.outDate) 이하 유효 입고건 반영
         itemInbounds.forEach(inb => {
-          if (!appliedInboundIds.has(inb.id)) {
-            if (inb.dueDate >= todayStr && inb.dueDate <= out.outDate) {
-              runningStock += inb.qty;
-              appliedInboundIds.add(inb.id);
-            }
+          if (!processedInboundIds.has(inb.id) && inb.dueDate >= todayStr && inb.dueDate <= out.outDate) {
+            runningStock += inb.qty;
+            processedInboundIds.add(inb.id);
           }
         });
 
-        // 출고 차감
         runningStock -= out.qty;
 
-        // 경고 색상 띠 판정
         let status = 'NORMAL';
         if (runningStock < 0) {
-          status = 'RED'; // 0미만: 빨간 띠 (위험)
+          status = 'RED';
         } else if (runningStock >= 0 && runningStock <= 20) {
-          status = 'YELLOW'; // 0이상 ~ 20이하: 노란 띠 (주의)
+          status = 'YELLOW';
         }
 
-        // 오늘 이후 출고건 중, RED 또는 YELLOW 상태인 경고건만 추출
         if (status !== 'NORMAL' && out.outDate >= todayStr) {
-          // 출고일 기준 예정 입고건
           const futureInbounds = itemInbounds.filter(i => i.dueDate >= out.outDate && i.qty > 0);
-          
-          // ★ [보완] 오늘 날짜 이전(지연건) 입고 항목 (수량이 1개 이상인 건)
           const delayedInbounds = itemInbounds.filter(i => i.dueDate < todayStr && i.qty > 0);
-
           const recentInbound = futureInbounds[0];
 
           alerts.push({
@@ -465,11 +450,37 @@ function ERPApp() {
     return alerts;
   }, [itemMasterData, customerData, supplierData]);
 
-  const filteredAlerts = deficitAlerts.filter(alert => {
-    if (alertFilter === 'YELLOW') return alert.status === 'YELLOW';
-    if (alertFilter === 'RED') return alert.status === 'RED';
-    return true;
-  });
+  // 부족예정 경고가 발생한 고객사 목록 추출 (드롭다운 옵션용)
+  const alertCustomers = useMemo(() => {
+    const set = new Set();
+    deficitAlerts.forEach(a => {
+      if (a.customer && a.customer !== '-') set.add(a.customer);
+    });
+    return Array.from(set).sort();
+  }, [deficitAlerts]);
+
+  // 다중 필터링 적용 (상태 + 고객사 + 경고 목록 전용 품목 검색)
+  const filteredAlerts = useMemo(() => {
+    return deficitAlerts.filter(alert => {
+      if (alertFilter === 'YELLOW' && alert.status !== 'YELLOW') return false;
+      if (alertFilter === 'RED' && alert.status !== 'RED') return false;
+
+      if (alertCustomerFilter !== 'ALL' && alert.customer !== alertCustomerFilter) return false;
+
+      if (alertSearchTerm.trim()) {
+        const query = alertSearchTerm.trim().toLowerCase();
+        const master = itemMasterData.find(m => m.itemCode === alert.itemCode);
+        const futuresCode = master ? master.futuresCode : '';
+        
+        const matchItemCode = alert.itemCode.toLowerCase().includes(query);
+        const matchFuturesCode = futuresCode.toLowerCase().includes(query);
+
+        if (!matchItemCode && !matchFuturesCode) return false;
+      }
+
+      return true;
+    });
+  }, [deficitAlerts, alertFilter, alertCustomerFilter, alertSearchTerm, itemMasterData]);
 
   const toggleCalendarRedHighlight = (targetDate) => {
     if (calendarRedHighlightDate === targetDate) {
@@ -482,11 +493,12 @@ function ERPApp() {
   // --------------------------------------------------------------------------
   // 캘린더 계산
   // --------------------------------------------------------------------------
-  const highlightedOutboundDates = useMemo(() => {
-    if (!selectedSearchItem) return [];
-    return customerData
+  const highlightedOutboundDatesSet = useMemo(() => {
+    if (!selectedSearchItem) return new Set();
+    const dates = customerData
       .filter(c => c.itemCode === selectedSearchItem.itemCode)
       .map(c => c.outDate);
+    return new Set(dates);
   }, [selectedSearchItem, customerData]);
 
   const outboundsByDateMap = useMemo(() => {
@@ -512,7 +524,7 @@ function ERPApp() {
       const dateStr = `${currentYear}-${mStr}-${dStr}`;
 
       const dateOutboundList = outboundsByDateMap.get(dateStr) || [];
-      const isHighlighted = highlightedOutboundDates.includes(dateStr);
+      const isHighlighted = highlightedOutboundDatesSet.has(dateStr);
       const isRedAlertHighlighted = calendarRedHighlightDate === dateStr;
 
       days.push({
@@ -524,7 +536,7 @@ function ERPApp() {
       });
     }
     return days;
-  }, [currentYear, currentMonth, outboundsByDateMap, highlightedOutboundDates, calendarRedHighlightDate]);
+  }, [currentYear, currentMonth, outboundsByDateMap, highlightedOutboundDatesSet, calendarRedHighlightDate]);
 
   const selectedDayOutbounds = useMemo(() => {
     if (!selectedCalendarDate) return [];
@@ -701,9 +713,11 @@ function ERPApp() {
           {/* RIGHT: DEFICIT ALERT PANEL (Col 5) */}
           <div className="lg:col-span-5 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col space-y-4">
             
-            <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+            {/* Header & Status Filter Tabs */}
+            <div className="flex flex-wrap justify-between items-center gap-2 border-b border-slate-100 pb-3">
               <h2 className="text-base font-black text-slate-800 flex items-center gap-2">
-                <span>⚠️</span> 부족예정 경고 <span className="text-xs font-bold text-slate-400">({filteredAlerts.length}건)</span>
+                <span>⚠️</span> 부족예정 경고 
+                <span className="text-xs font-bold text-slate-400">({filteredAlerts.length} / 전체 {deficitAlerts.length}건)</span>
               </h2>
 
               <div className="flex bg-slate-100 p-1 rounded-xl text-xs font-semibold">
@@ -728,11 +742,49 @@ function ERPApp() {
               </div>
             </div>
 
+            {/* Customer Dropdown & Item Search Bar */}
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 bg-slate-50 p-2.5 rounded-xl border border-slate-200/80">
+              {/* 고객사 선택 드롭다운 */}
+              <div className="sm:col-span-5">
+                <select
+                  value={alertCustomerFilter}
+                  onChange={(e) => setAlertCustomerFilter(e.target.value)}
+                  className="w-full bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="ALL">🏢 모든 고객사 ({alertCustomers.length}곳)</option>
+                  {alertCustomers.map(cust => (
+                    <option key={cust} value={cust}>{cust}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* 경고 전용 품목코드 검색창 */}
+              <div className="sm:col-span-7 relative">
+                <input
+                  type="text"
+                  value={alertSearchTerm}
+                  onChange={(e) => setAlertSearchTerm(e.target.value)}
+                  placeholder="경고 항목 내 품목코드 검색..."
+                  className="w-full bg-white border border-slate-300 rounded-lg pl-2.5 pr-7 py-1.5 text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder:font-normal placeholder:text-slate-400"
+                />
+                {alertSearchTerm && (
+                  <button
+                    onClick={() => setAlertSearchTerm('')}
+                    className="absolute right-2 top-1.5 text-slate-400 hover:text-slate-600 text-xs font-bold"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            </div>
+
             {/* Alert List */}
-            <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
+            <div className="space-y-3 max-h-[480px] overflow-y-auto pr-1">
               {filteredAlerts.length === 0 ? (
                 <div className="py-16 text-center text-slate-400 text-xs">
-                  오늘 이후 예정된 부족 항목이 없습니다.
+                  {deficitAlerts.length === 0 
+                    ? '오늘 이후 예정된 부족 항목이 없습니다.' 
+                    : '검색 및 필터 조건에 일치하는 부족 항목이 없습니다.'}
                 </div>
               ) : (
                 filteredAlerts.map(alert => {
@@ -799,11 +851,9 @@ function ERPApp() {
                             </button>
                           </div>
 
-                          {/* ★ 입고일정 상세 영역 (과거 지연건 + 미래 예정건 모두 표시) */}
+                          {/* 입고일정 상세 영역 */}
                           {isExpanded && (
                             <div className="mt-2 pt-2 border-t border-slate-200 text-xs bg-white p-3 rounded-xl space-y-2.5 shadow-inner">
-                              
-                              {/* 1. 오늘 기준 과거 지연 입고건 (수량 >= 1) */}
                               {alert.delayedInbounds && alert.delayedInbounds.length > 0 && (
                                 <div className="space-y-1 bg-red-50/60 p-2 rounded-lg border border-red-100">
                                   <p className="font-bold text-red-600 text-[11px] flex items-center gap-1">
@@ -818,7 +868,6 @@ function ERPApp() {
                                 </div>
                               )}
 
-                              {/* 2. 납품일 기준 미래 입고 예정건 */}
                               <div className="space-y-1">
                                 <p className="font-bold text-slate-700 text-[11px]">
                                   📦 납품일({alert.deliveryDate}) 기준 입고 예정 목록:
@@ -834,7 +883,6 @@ function ERPApp() {
                                   <p className="text-slate-400 text-[11px]">납품일 이후 예정된 입고 일정이 없습니다.</p>
                                 )}
                               </div>
-
                             </div>
                           )}
 
@@ -884,4 +932,7 @@ function ERPApp() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<ERPApp />);
+const rootElement = document.getElementById('root');
+if (rootElement) {
+  ReactDOM.createRoot(rootElement).render(<ERPApp />);
+}
